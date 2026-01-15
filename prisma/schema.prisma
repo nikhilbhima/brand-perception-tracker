@@ -1,0 +1,289 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// AUTHENTICATION & USERS (NextAuth.js)
+// ============================================
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts             Account[]
+  sessions             Session[]
+  brands               Brand[]
+  notificationSettings NotificationSettings?
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ============================================
+// BRAND MONITORING (Multi-tenant)
+// ============================================
+
+// User's tracked brands
+model Brand {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  slug      String
+  isOwn     Boolean  @default(true) // true = user's brand, false = competitor
+  logoUrl   String?
+  website   String?
+
+  // Platform identifiers for scraping
+  trustpilotId String?
+  g2Id         String?
+  capterraId   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  mentions  Mention[]
+  reviews   Review[]
+  snapshots CompetitorSnapshot[]
+
+  @@unique([userId, slug])
+  @@index([userId])
+}
+
+// All mentions from all sources
+model Mention {
+  id             String    @id @default(cuid())
+  brandId        String
+  brand          Brand     @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  source         Source
+  sourceId       String
+  title          String?
+  content        String    @db.Text
+  url            String
+  author         String?
+  sentiment      Sentiment
+  sentimentScore Float     // -1.0 to 1.0
+  priority       Priority
+  region         String?
+  metadata       Json?
+  alertSent      Boolean   @default(false)
+  digestIncluded Boolean   @default(false)
+  publishedAt    DateTime
+  createdAt      DateTime  @default(now())
+
+  alerts Alert[]
+
+  @@unique([source, sourceId])
+  @@index([brandId, publishedAt(sort: Desc)])
+  @@index([sentiment, alertSent])
+  @@index([priority, createdAt(sort: Desc)])
+}
+
+// Reviews from platforms (G2, Capterra, TrustPilot, etc.)
+model Review {
+  id          String    @id @default(cuid())
+  brandId     String
+  brand       Brand     @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  source      Source
+  sourceId    String
+  rating      Float     // 1-5 stars
+  title       String?
+  content     String    @db.Text
+  author      String?
+  authorUrl   String?
+  region      String?
+  sentiment   Sentiment
+  url         String
+  helpful     Int       @default(0)
+  verified    Boolean   @default(false)
+  pros        String?   @db.Text
+  cons        String?   @db.Text
+  publishedAt DateTime
+  createdAt   DateTime  @default(now())
+
+  @@unique([source, sourceId])
+  @@index([brandId, publishedAt(sort: Desc)])
+  @@index([rating])
+  @@index([source, brandId])
+}
+
+// Daily digest records (per user)
+model Digest {
+  id         String   @id @default(cuid())
+  userId     String
+  date       DateTime @db.Date
+  summary    String   @db.Text
+  stats      Json     // {reviews: 3, articles: 2, mentions: 5, sentiment: {...}}
+  sentiment  String   // Overall sentiment description
+  highlights Json     // Key items to surface
+  sentAt     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, date])
+  @@index([userId, date(sort: Desc)])
+}
+
+// Alert history
+model Alert {
+  id        String   @id @default(cuid())
+  userId    String
+  mentionId String?
+  mention   Mention? @relation(fields: [mentionId], references: [id], onDelete: SetNull)
+  priority  Priority
+  channel   Channel
+  message   String   @db.Text
+  sentAt    DateTime @default(now())
+  delivered Boolean  @default(true)
+  error     String?
+
+  @@index([userId, sentAt(sort: Desc)])
+  @@index([channel])
+}
+
+// User notification preferences
+model NotificationSettings {
+  id               String  @id @default(cuid())
+  userId           String  @unique
+  user             User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Slack
+  slackWebhook     String?
+  criticalSlack    Boolean @default(true)
+  warningSlack     Boolean @default(true)
+  digestSlack      Boolean @default(false)
+
+  // Telegram
+  telegramChatId   String?
+  criticalTelegram Boolean @default(true)
+  warningTelegram  Boolean @default(false)
+
+  // Email
+  email            String?
+  criticalEmail    Boolean @default(false)
+  warningEmail     Boolean @default(false)
+  digestEmail      Boolean @default(true)
+
+  // Digest settings
+  digestTime       String  @default("09:00") // HH:mm
+  timezone         String  @default("UTC")
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+// Competitor comparison snapshots (daily aggregates)
+model CompetitorSnapshot {
+  id           String   @id @default(cuid())
+  brandId      String
+  brand        Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  date         DateTime @db.Date
+  avgRating    Float?
+  reviewCount  Int      @default(0)
+  mentionCount Int      @default(0)
+  sentimentAvg Float    @default(0)
+  region       String?
+  sources      Json?    // breakdown by source
+  createdAt    DateTime @default(now())
+
+  @@unique([brandId, date, region])
+  @@index([date(sort: Desc)])
+}
+
+// Job tracking for cron operations
+model CronJob {
+  id          String    @id @default(cuid())
+  type        String    // REFRESH, DIGEST
+  status      JobStatus @default(PENDING)
+  startedAt   DateTime?
+  completedAt DateTime?
+  error       String?
+  metadata    Json?
+  createdAt   DateTime  @default(now())
+
+  @@index([type, createdAt(sort: Desc)])
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum Source {
+  TRUSTPILOT
+  G2
+  CAPTERRA
+  SOURCEFORGE
+  GARTNER
+  NEWSAPI
+  GOOGLE_ALERTS
+  REDDIT
+  YOUTUBE
+  TWITTER
+  HACKERNEWS
+}
+
+enum Sentiment {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+}
+
+enum Priority {
+  CRITICAL  // ≤2 star review, viral negative → Immediate
+  WARNING   // Negative PR, negative thread → Immediate
+  INFO      // Neutral mentions → Daily digest
+}
+
+enum Channel {
+  SLACK
+  TELEGRAM
+  EMAIL
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
